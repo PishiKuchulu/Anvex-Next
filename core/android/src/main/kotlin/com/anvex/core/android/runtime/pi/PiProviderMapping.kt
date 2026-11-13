@@ -8,9 +8,14 @@ import org.json.JSONObject
 /**
  * Maps an Anvex provider onto a Pi `models.json` provider entry.
  *
- * The API key is NEVER placed in the JSON: the entry references
- * `$ANVEX_PI_API_KEY` and the driver receives the key over the local
- * control socket, keeping it in the :node process's memory only.
+ * M-1: the API key is embedded LITERALLY in the entry. Pi's schema
+ * accepts a literal key (its template resolver passes a value with no
+ * `$NAME` parts through unchanged), and models.json is written by the
+ * driver only into the app-private / SensitivePaths-protected
+ * `.anvex-pi` agent dir, whose contents Pi's own tools are hard-denied
+ * from reading. The key must NEVER ride the process environment (the
+ * old `$ANVEX_PI_API_KEY` interpolation): every bash child inherits
+ * that environment, and a generic env dump would carry the key.
  *
  * Supported wire families (Pi api ids):
  *  - OpenAI-compatible (OpenAI, Custom OpenAI, OpenRouter, DeepSeek,
@@ -22,8 +27,6 @@ import org.json.JSONObject
  * instead of guessing a protocol.
  */
 object PiProviderMapping {
-
-    const val API_KEY_ENV = "ANVEX_PI_API_KEY"
 
     data class PiProvider(
         val providerName: String,
@@ -63,7 +66,7 @@ object PiProviderMapping {
         val provider = JSONObject()
             .put("baseUrl", config.baseUrl)
             .put("api", api)
-            .put("apiKey", "\$$API_KEY_ENV")
+            .put("apiKey", runtime.apiKey)
             .put("models", JSONArray(listOf(model)))
         val root = JSONObject().put("providers", JSONObject().put(name, provider))
         return PiProvider(providerName = name, modelId = config.model, modelsJson = root)

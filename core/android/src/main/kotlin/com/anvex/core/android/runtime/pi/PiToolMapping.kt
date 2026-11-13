@@ -132,14 +132,17 @@ object PiToolMapping {
 
     private fun bashDenied(command: String, projectRoot: File?): Boolean {
         if (command.isBlank()) return false
-        // SEC-001 (forensic audit, 2026-11-07): the provider API key lives
-        // in the Pi process environment under this exact name (driver.mjs
-        // places it there for models.json interpolation). A bash command
-        // that names it is reading the credential — never legitimate
-        // project work, and never something a prompt should talk a user
-        // into allowing. Hard-denied before any approval is consulted.
-        // (Generic env dumps — printenv, $VAR — are approval-gated in
-        // ActionSafetyPolicy; this name is denied outright.)
+        // SEC-001 (forensic audit, 2026-11-07): the provider API key used
+        // to live in the Pi process environment under this exact name
+        // (driver.mjs placed it there for models.json interpolation).
+        // M-1 removed it from the environment — the key now reaches Pi
+        // only through the protected models.json — but this deny stays
+        // as a backstop: a bash command that names it is fishing for the
+        // credential, never legitimate project work, and never something
+        // a prompt should talk a user into allowing. Hard-denied before
+        // any approval is consulted. (Generic env dumps — printenv,
+        // $VAR — are approval-gated in ActionSafetyPolicy; this name is
+        // denied outright.)
         if (command.contains("ANVEX_PI_API_KEY")) return true
         if (SensitivePaths.commandReferencesSensitiveOutsideExtracted(command)) return true
         // M0 (H-1): recursive reads sweep the whole tree, secrets
