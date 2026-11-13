@@ -34,7 +34,7 @@ object SensitivePaths {
 
     /** Sample names used to decide whether a shell glob could hit a secret. */
     private val SECRET_SAMPLES = listOf(
-        ".env", ".env.local", ".env.production", "id_rsa", "id_ed25519",
+        ".env", ".env.local", ".env.production", "prod.env", "id_rsa", "id_ed25519",
         ".npmrc", ".netrc", ".git-credentials", "credentials.json",
         "service-account.json", "secrets.json", "server.pem", "release.keystore",
         "release.jks", "cert.p12", "private.key", "local.properties",
@@ -54,7 +54,21 @@ object SensitivePaths {
      * could expand to a secret file name (`.e?v`, `.env*`, `*.pem`).
      * Mirrors shell rules: a leading wildcard never matches a dotfile.
      */
-    private fun globCouldMatchSecret(token: String): Boolean {
+    fun globCouldMatchSecret(token: String): Boolean {
+        // M0 fix round (brace expansion): a shell that performs brace
+        // expansion turns `{*.env,*.key}` into `*.env *.key` BEFORE
+        // globbing, but the token reaching this filter is the unexpanded
+        // form, whose braces the glob builder below would treat as
+        // literals. Expand the alternatives and judge each expanded
+        // form instead. Only applies when the token also carries glob
+        // metacharacters — brace tokens without them (`{"a":1}`, the
+        // `{}` placeholder of `find -exec`) are ordinary syntax and
+        // stay untouched (no blanket brace deny).
+        if (token.any { it == '*' || it == '?' || it == '[' }) {
+            braceAlternatives(token)?.let { forms ->
+                return forms.any { globCouldMatchSecret(it) }
+            }
+        }
         if (token.none { it == '*' || it == '?' || it == '[' }) return false
         val base = token.substringAfterLast('/')
         if (base.isEmpty()) return false
@@ -75,11 +89,53 @@ object SensitivePaths {
         }
         val regex = runCatching { Regex(rx.toString()) }.getOrNull() ?: return true
         val startsWithDot = base.startsWith(".")
-        // A bare `*` / `?` names nothing in particular (and never matches dotfiles), so it is
+        // A bare `?` names nothing in particular (and never matches dotfiles), so it is
         // not treated as a secret reference; dotfile globs (`.*`, `.e?v`) always are.
-        if (!startsWithDot && base.count { it != '*' && it != '?' && it != '[' && it != ']' } < 2) return false
+        // M0 (H-1): a bare `*` / `**` is the exception — it expands to every
+        // non-dotfile in the directory, which includes non-dotfile secrets
+        // (prod.env, credentials.json, server.pem), so it counts.
+        val bareStar = base.all { it == '*' }
+        if (!startsWithDot && !bareStar && base.count { it != '*' && it != '?' && it != '[' && it != ']' } < 2) return false
         return SECRET_SAMPLES.any { sample ->
             (startsWithDot || !sample.startsWith(".")) && regex.matches(sample)
+        }
+    }
+
+    /**
+     * The expansions of the FIRST `{a,b,…}` group in [token], or null
+     * when the token has no comma-bearing brace group. Further groups
+     * in the prefix/suffix are handled by the caller's recursion into
+     * [globCouldMatchSecret] on each expanded form.
+     */
+    private fun braceAlternatives(token: String): List<String>? {
+        val open = token.indexOf('{')
+        if (open < 0) return null
+        val close = token.indexOf('}', open + 1)
+        if (close < 0) return null
+        val inner = token.substring(open + 1, close)
+        if (',' !in inner) return null
+        val prefix = token.substring(0, open)
+        val suffix = token.substring(close + 1)
+        return inner.split(',').map { prefix + it + suffix }
+    }
+
+    /**
+     * M0 (H-1): the shared recursive-read primitive — grep with a
+     * recursive flag, or ripgrep (recursive by design), sweeps the whole
+     * tree, secrets included. Defined once here and consumed by
+     * ActionSafetyPolicy (approval gate) and PiToolMapping.bashDenied
+     * (hard deny), so the two paths cannot drift apart.
+     */
+    fun isRecursiveRead(cmd: String, args: List<String>): Boolean {
+        return when (cmd.substringAfterLast('/').lowercase()) {
+            "rg", "ripgrep" -> true
+            "grep", "egrep", "fgrep" -> args.any { a ->
+                val f = a.substringBefore('=')
+                f == "-r" || f == "-R" || f == "--recursive" || f == "--dereference-recursive" ||
+                    (f.length > 2 && f.startsWith("-") && !f.startsWith("--") &&
+                        f.drop(1).any { it == 'r' || it == 'R' })
+            }
+            else -> false
         }
     }
 

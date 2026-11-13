@@ -157,6 +157,60 @@ class PiMappingsTest {
     }
 
     @Test
+    fun `m0 bare globs and recursive reads are hard denied in pi bash`() {
+        val root = java.io.File(System.getProperty("java.io.tmpdir"), "anvex-pi-test-root").apply { mkdirs() }
+        fun denied(command: String) =
+            PiToolMapping.isHardDenied("bash", JSONObject().put("command", command), root)
+        fun allowed(command: String) = !denied(command)
+        // H-1: a bare glob or a recursive read sweeps the whole tree,
+        // secrets included — never let it through, even with approval.
+        assertTrue(denied("cat *"))
+        assertTrue(denied("cat *.env"))
+        assertTrue(denied("head -n 999 *"))
+        assertTrue(denied("grep -r \"BEGIN\" ."))
+        assertTrue(denied("grep -R key ."))
+        assertTrue(denied("rg secret"))
+        assertTrue(denied("ripgrep secret"))
+        // Ordinary project reads stay allowed.
+        assertTrue(allowed("cat README.md"))
+        assertTrue(allowed("cat *.md"))
+        assertTrue(allowed("grep pattern file.txt"))
+        assertTrue(allowed("ls"))
+        assertTrue(allowed("npm run build"))
+    }
+
+    @Test
+    fun `m0 fix round dereference recursive grep and brace glob are hard denied in pi bash`() {
+        val root = java.io.File(System.getProperty("java.io.tmpdir"), "anvex-pi-test-root").apply { mkdirs() }
+        fun denied(command: String) =
+            PiToolMapping.isHardDenied("bash", JSONObject().put("command", command), root)
+        fun allowed(command: String) = !denied(command)
+        // --dereference-recursive is -R in long form: same tree sweep.
+        assertTrue(denied("grep --dereference-recursive key ."))
+        // Brace expansion (when the resolved shell does it) turns this
+        // into `cat *.env *.key` before globbing.
+        assertTrue(denied("cat {*.env,*.key}"))
+        // Legit braces and non-secret brace globs stay allowed.
+        assertTrue(allowed("cat {*.md,*.txt}"))
+        assertTrue(allowed("echo {a:1}"))
+    }
+
+    @Test
+    fun `m0 direct execution of a session written script is detected`() {
+        val root = java.io.File("/proj")
+        val written = setOf("run.sh", "x.ts")
+        // M-2: no interpreter token — the script IS the command word.
+        assertTrue(PiToolMapping.executesWrittenScript("./run.sh", written, root))
+        assertTrue(PiToolMapping.executesWrittenScript("npx ts-node x.ts", written, root))
+        assertTrue(PiToolMapping.executesWrittenScript("tsx x.ts", written, root))
+        assertTrue(PiToolMapping.executesWrittenScript("bunx x.ts", written, root))
+        // Scripts that predate the session, and merely reading a written
+        // file, are unaffected.
+        assertFalse(PiToolMapping.executesWrittenScript("./existing.sh", written, root))
+        assertFalse(PiToolMapping.executesWrittenScript("cat run.sh", written, root))
+    }
+
+    @Test
     fun `provider families map to pi apis`() {
         assertEquals("openai-completions", PiProviderMapping.apiFor(ProviderKind.DEEPSEEK))
         assertEquals("openai-completions", PiProviderMapping.apiFor(ProviderKind.CUSTOM_OPENAI))
