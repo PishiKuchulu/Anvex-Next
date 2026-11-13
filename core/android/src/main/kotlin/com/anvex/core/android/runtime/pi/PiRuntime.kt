@@ -22,7 +22,7 @@ import java.util.zip.ZipInputStream
  */
 object PiRuntime {
 
-    const val RUNTIME_VERSION = "pi-1.4.1-auth"
+    const val RUNTIME_VERSION = "pi-1.4.2-noenv"
     private const val ASSET_NAME = "pi-runtime.zip"
     private const val MARKER = ".anvex-pi-runtime.ok"
 

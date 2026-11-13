@@ -3,6 +3,7 @@ package com.anvex.core.android.runtime.pi
 import com.anvex.core.ai.ProviderRuntimeConfig
 import com.anvex.core.engine.ActionSafetyPolicy
 import com.anvex.core.engine.BoltAction
+import com.anvex.core.engine.SensitivePaths
 import com.anvex.core.model.ProviderConfig
 import com.anvex.core.model.ProviderKind
 import org.json.JSONObject
@@ -14,8 +15,12 @@ import org.junit.Test
 
 /**
  * Phase-3 wiring contracts: Pi tool calls must land on the same
- * BoltAction safety semantics as the native harness, and provider
- * mapping must never embed a plaintext key in models.json.
+ * BoltAction safety semantics as the native harness. Provider mapping
+ * contract (M-1): the API key is embedded literally in models.json —
+ * a file that lives only inside the SensitivePaths-protected
+ * `.anvex-pi` agent dir and is hard-denied to Pi's own tools — and is
+ * NEVER placed in the Pi process environment or referenced through
+ * `$ENV` interpolation, where any bash child could dump it.
  */
 class PiMappingsTest {
 
@@ -220,21 +225,54 @@ class PiMappingsTest {
     }
 
     @Test
-    fun `models json references the key via env only`() {
+    fun `m1 models json embeds the literal key and never references the env var`() {
+        // M-1: the key reaches Pi ONLY as a literal inside models.json
+        // (written by the driver into the protected .anvex-pi agent
+        // dir). The old `$ANVEX_PI_API_KEY` env interpolation put the
+        // key in the Pi process environment, where every bash child
+        // inherited it.
         val runtime = ProviderRuntimeConfig(
             config = ProviderConfig(
                 id = "p1", name = "DeepSeek", kind = ProviderKind.DEEPSEEK,
                 baseUrl = "https://api.deepseek.com", model = "deepseek-chat",
             ),
-            apiKey = "sk-must-never-appear",
+            apiKey = "sk-m1-literal-key",
         )
         val mapped = PiProviderMapping.forRuntime(runtime)
         assertEquals("anvex-p1", mapped?.providerName)
         assertEquals("deepseek-chat", mapped?.modelId)
         val json = mapped!!.modelsJson.toString()
-        assertFalse("plaintext key leaked into models.json", json.contains("sk-must-never-appear"))
-        assertTrue(json.contains("$" + "ANVEX_PI_API_KEY"))
+        assertTrue("literal key must be embedded in models.json", json.contains("sk-m1-literal-key"))
+        assertFalse("models.json must not reference the env var", json.contains("ANVEX_PI_API_KEY"))
         assertTrue(json.contains("openai-completions"))
+    }
+
+    @Test
+    fun `m1 models json file is sensitive and hard denied to pi bash`() {
+        val root = java.io.File(System.getProperty("java.io.tmpdir"), "anvex-pi-test-root").apply { mkdirs() }
+        // The file that now carries the literal key is inside the
+        // metadata subtree SensitivePaths treats as sensitive…
+        assertTrue(SensitivePaths.isSensitive(".anvex-pi/agent/models.json"))
+        // …and Pi's own bash can never read it back.
+        assertTrue(
+            PiToolMapping.isHardDenied(
+                "bash",
+                JSONObject().put("command", "cat .anvex-pi/agent/models.json"),
+                root,
+            ),
+        )
+        // Premise of the instrumented env proof (PiEngineTest): an
+        // `env` dump is approval-gated by policy but NOT hard-denied,
+        // so a test that approves the prompt can capture the Pi
+        // process environment from a bash child.
+        assertFalse(
+            PiToolMapping.isHardDenied(
+                "bash",
+                JSONObject().put("command", "env > poc-out/env-dump.txt"),
+                root,
+            ),
+        )
+        assertTrue(ActionSafetyPolicy.assess("env > poc-out/env-dump.txt").requiresApproval)
     }
 
     @Test

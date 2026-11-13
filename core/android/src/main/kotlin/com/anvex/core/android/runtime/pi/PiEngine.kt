@@ -179,12 +179,14 @@ class PiEngine(
                 }
             }
 
-            // Config line (consumed by the driver; carries the API key,
-            // which then lives in the :node process's environment — and
-            // therefore in every shell child's environment too, which is
-            // why ActionSafetyPolicy gates env dumps / variable expansion
-            // and PiToolMapping hard-denies naming the key (SEC-001,
-            // forensic audit 2026-11-07)).
+            // Config line (consumed by the driver; carries the API key
+            // in memory over this authenticated socket only. Since M-1
+            // the driver never places it in the :node process's
+            // environment — the key reaches Pi solely through the
+            // protected models.json — so shell children cannot inherit
+            // it. ActionSafetyPolicy still gates env dumps / variable
+            // expansion and PiToolMapping hard-denies naming the key as
+            // a backstop (SEC-001, forensic audit 2026-11-07)).
             val configJson = JSONObject()
                 .put("extraExtensions", org.json.JSONArray(config.extraExtensions))
             if (config.providerName != null) configJson.put("providerName", config.providerName)
