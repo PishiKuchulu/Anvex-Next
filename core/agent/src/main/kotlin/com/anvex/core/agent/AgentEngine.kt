@@ -27,9 +27,10 @@ interface AgentEngine {
 
     /**
      * Runs one turn for [prompt] in [context] and returns its event stream.
-     * The flow is cold: collection starts the turn, cancellation abandons
-     * it. It always ends with exactly one terminal event —
-     * [AgentEvent.TurnCompleted] or [AgentEvent.TurnFailed].
+     * The flow is cold: collection starts the turn. On normal completion or
+     * failure it ends with exactly one terminal event — TurnCompleted or
+     * TurnFailed. Collector cancellation abandons the turn; a cancelled turn
+     * is not guaranteed to emit a terminal event.
      */
     fun runTurn(context: TurnContext, prompt: String): Flow<AgentEvent>
 }
