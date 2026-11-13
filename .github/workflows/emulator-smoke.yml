@@ -63,3 +63,17 @@ jobs:
             [ -f "$f" ] && { echo "=== $f ==="; cat "$f"; }
           done
           grep -rh "PI-POC-RESULTS" core/android/build/outputs/androidTest-results/ 2>/dev/null | head -3 || true
+
+      # A1 Task 3: keep the per-test XML/HTML reports as an artifact so a
+      # receipt names individual instrumented tests (e.g. the M-1 env-proof
+      # test), not just the connectedDebugAndroidTest step outcome.
+      - name: Upload instrumented test reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: android-test-reports
+          path: |
+            core/android/build/outputs/androidTest-results/connected/**
+            core/android/build/reports/androidTests/connected/**
+          if-no-files-found: ignore
+          retention-days: 14

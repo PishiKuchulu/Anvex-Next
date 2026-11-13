@@ -39,7 +39,7 @@ jobs:
       # v4.10.1 (CI-03): a signed release must pass the unit suite first —
       # previously this workflow built and published with no test gate.
       - name: Unit tests
-        run: ./gradlew --no-daemon :core:engine:test :core:android:testDebugUnitTest :core:ai:test :app:testDebugUnitTest
+        run: ./gradlew --no-daemon :core:engine:test :core:android:testDebugUnitTest :core:ai:test :core:agent:test :app:testDebugUnitTest
 
       - name: Tag matches versionName (tag pushes only)
         if: startsWith(github.ref, 'refs/tags/v')
