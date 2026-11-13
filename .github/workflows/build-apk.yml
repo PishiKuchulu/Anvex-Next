@@ -58,7 +58,7 @@ jobs:
         run: python3 tools/verify_source_mirror.py
 
       - name: Unit tests
-        run: ./gradlew --no-daemon :core:engine:test :core:android:testDebugUnitTest :core:ai:test :app:testDebugUnitTest
+        run: ./gradlew --no-daemon :core:engine:test :core:android:testDebugUnitTest :core:ai:test :core:agent:test :app:testDebugUnitTest
 
       - name: Lint (v4.10.1, CI-04)
         # --continue: report every module's lint errors in ONE run instead
