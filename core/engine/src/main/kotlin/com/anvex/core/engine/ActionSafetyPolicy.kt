@@ -256,6 +256,13 @@ object ActionSafetyPolicy {
         // flag CLUSTERS through (`python3 -Bc`, `perl -le`) and missed
         // node's print flag (`node -p`). Any short-flag cluster carrying
         // an inline-code letter (e/c/p/r) is code execution.
+        // M0 (H-1): a recursive read sweeps the whole tree, secrets
+        // included — it can never run silently. Shared primitive:
+        // SensitivePaths.isRecursiveRead (Pi's bash gate hard-denies the
+        // same commands).
+        if (SensitivePaths.isRecursiveRead(cmd, args)) {
+            return destructive("Recursive read can sweep secret files anywhere in the tree.")
+        }
         if (cmd in INTERPRETER_COMMANDS && args.any { arg ->
                 arg == "-e" || arg == "-c" || arg == "--eval" || arg == "-r" ||
                     (arg.length >= 2 && arg.startsWith("-") && !arg.startsWith("--") &&
@@ -302,9 +309,20 @@ object ActionSafetyPolicy {
             } else null
             "chmod" -> when {
                 args.any { it == "777" } -> destructive("chmod 777 makes files world-writable.")
+                // M0 (M-2): `chmod +x` is what turns a model-written file
+                // into a directly executable script (`./run.sh` needs no
+                // interpreter token), so it always needs a human —
+                // simple and context-free on purpose.
+                args.any { it.contains("+x") } -> destructive("Making a file executable (+x) can enable running model-written code.")
                 hasFlag("-R", "--recursive") -> destructive("Recursive chmod changes permissions on many files at once.")
                 else -> null
             }
+            // M0 (H-1), defense-in-depth: a plain read whose operand is a
+            // glob that can match a secret file (`cat *`, `cat *.env`)
+            // needs a human, even though Pi's bash gate hard-denies it.
+            "cat", "head", "tail" -> if (operands.any { SensitivePaths.globCouldMatchSecret(it) }) {
+                destructive("Reading through a glob that can match secret files.")
+            } else null
             "mv", "cp" -> when {
                 args.any { it == ".git" || it.startsWith(".git/") } ->
                     destructive("Moving/copying repository metadata (.git).")

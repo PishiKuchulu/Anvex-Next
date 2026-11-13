@@ -142,6 +142,17 @@ object PiToolMapping {
         // ActionSafetyPolicy; this name is denied outright.)
         if (command.contains("ANVEX_PI_API_KEY")) return true
         if (SensitivePaths.commandReferencesSensitiveOutsideExtracted(command)) return true
+        // M0 (H-1): recursive reads sweep the whole tree, secrets
+        // included — hard-deny via the shared primitive, judged per
+        // segment so `ls | grep -r x .` is caught too. (Secret-matching
+        // globs are already denied above: that check consults
+        // SensitivePaths.globCouldMatchSecret.)
+        for (segment in command.split(Regex("\\s*(?:;|&&|\\|\\||\\||&)\\s*"))) {
+            val segTokens = segment.split(Regex("\\s+")).filter { it.isNotEmpty() }
+                .map { it.trim('\'', '"') }
+            val segCmd = segTokens.firstOrNull() ?: continue
+            if (SensitivePaths.isRecursiveRead(segCmd, segTokens.drop(1))) return true
+        }
         val root = projectRoot?.canonicalFile
         val tokens = command.split(Regex("\\s+")).filter { it.isNotEmpty() }
             .map { it.trim('\'', '"') }
@@ -200,21 +211,33 @@ object PiToolMapping {
      * file assesses SAFE — combined, they are silent code execution of
      * model-written code. PiEngine forces a real approval prompt for
      * exactly this combination; scripts that predate the session are
-     * unaffected.
+     * unaffected. M0 (M-2): direct execution (`./run.sh`) and the
+     * ts-node/tsx/bunx/npx runners count as execution too.
      */
+    /** Runner words that fetch/resolve a script by name (M0, M-2). */
+    private val SCRIPT_RUNNERS = setOf("ts-node", "tsx", "bunx", "npx")
+
     fun executesWrittenScript(command: String, writtenPaths: Set<String>, projectRoot: File?): Boolean {
         if (command.isBlank() || writtenPaths.isEmpty()) return false
         val tokens = command.split(Regex("\\s+")).filter { it.isNotEmpty() }
             .map { it.trim('\'', '"') }
-        val interpreterIndex = tokens.indexOfFirst {
-            it.substringAfterLast('/').lowercase() in SCRIPT_INTERPRETERS
-        }
-        if (interpreterIndex < 0) return false
-        return tokens.drop(interpreterIndex + 1).any { token ->
+        fun pathOf(token: String): String? {
             // --flag=<path> and KEY=<path> shapes carry the path after '='.
             val candidate = if (token.contains('=')) token.substringAfter('=') else token
-            normalizeProjectPath(candidate, projectRoot) in writtenPaths
+            return normalizeProjectPath(candidate, projectRoot)
         }
+        // M0 (M-2): the command word itself can BE the script —
+        // `./run.sh` executes a session-written file with no interpreter
+        // token at all (after a `chmod +x`, which now also requires
+        // approval). Merely naming a written file later in the command
+        // (`cat run.sh`) is a read, not an execution, and stays safe.
+        if (tokens.firstOrNull()?.let { pathOf(it) } in writtenPaths) return true
+        val interpreterIndex = tokens.indexOfFirst {
+            val word = it.substringAfterLast('/').lowercase()
+            word in SCRIPT_INTERPRETERS || word in SCRIPT_RUNNERS
+        }
+        if (interpreterIndex < 0) return false
+        return tokens.drop(interpreterIndex + 1).any { token -> pathOf(token) in writtenPaths }
     }
 
     /**
