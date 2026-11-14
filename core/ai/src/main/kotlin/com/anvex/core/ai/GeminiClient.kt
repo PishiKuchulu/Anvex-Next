@@ -33,20 +33,54 @@ class GeminiClient(
     private val base = runtime.config.baseUrl.trimEnd('/')
 
     override fun streamChat(request: ChatRequest): Flow<StreamEvent> = flow {
-        val lastUserIndex = request.turns.indexOfLast { it.role == MessageRole.USER }
+        // A2b: tool-result turns also carry MessageRole.USER (see
+        // ChatTurn) but are not user messages — attachments belong to
+        // real user turns (mirrors the OpenAI client). Gemini matches
+        // a functionResponse to its call by NAME, so result turns
+        // resolve the name from the conversation's own tool calls.
+        val lastUserIndex = request.turns.indexOfLast { it.role == MessageRole.USER && it.toolCallId == null }
+        val nameByCallId: Map<String, String> =
+            request.turns.flatMap { it.toolCalls }.associate { it.id to it.name }
         val contents = buildJsonArray {
             request.turns.forEachIndexed { index, turn ->
                 val isLastUser = turn.role == MessageRole.USER && index == lastUserIndex
                 add(buildJsonObject {
                     put("role", if (turn.role == MessageRole.USER) "user" else "model")
                     put("parts", buildJsonArray {
-                        add(buildJsonObject { put("text", turn.content) })
-                        if (isLastUser) request.attachments.forEach { a ->
-                            when {
-                                a.isImage && a.base64 != null -> add(buildJsonObject {
-                                    put("inlineData", buildJsonObject { put("mimeType", a.mimeType); put("data", a.base64) })
+                        // A2b (§5.2): native tool-calling turn shapes.
+                        // Plain turns render exactly as before
+                        // (byte-identical no-tools requests are a
+                        // regression lock).
+                        when {
+                            turn.toolCallId != null -> add(buildJsonObject {
+                                put("functionResponse", buildJsonObject {
+                                    put("name", nameByCallId[turn.toolCallId] ?: turn.toolCallId)
+                                    put("response", buildJsonObject { put("result", turn.content) })
                                 })
-                                !a.text.isNullOrBlank() -> add(buildJsonObject { put("text", "\n[Attachment: ${a.name}]\n${a.text}") })
+                            })
+                            turn.toolCalls.isNotEmpty() -> {
+                                if (turn.content.isNotBlank()) {
+                                    add(buildJsonObject { put("text", turn.content) })
+                                }
+                                turn.toolCalls.forEach { call ->
+                                    add(buildJsonObject {
+                                        put("functionCall", buildJsonObject {
+                                            put("name", call.name)
+                                            put("args", jsonObjectOrEmpty(call.argumentsJson))
+                                        })
+                                    })
+                                }
+                            }
+                            else -> {
+                                add(buildJsonObject { put("text", turn.content) })
+                                if (isLastUser) request.attachments.forEach { a ->
+                                    when {
+                                        a.isImage && a.base64 != null -> add(buildJsonObject {
+                                            put("inlineData", buildJsonObject { put("mimeType", a.mimeType); put("data", a.base64) })
+                                        })
+                                        !a.text.isNullOrBlank() -> add(buildJsonObject { put("text", "\n[Attachment: ${a.name}]\n${a.text}") })
+                                    }
+                                }
                             }
                         }
                     })
@@ -62,8 +96,31 @@ class GeminiClient(
                 }
             )
             put("contents", contents)
-            if (request.webSearch) {
-                put("tools", buildJsonArray { add(buildJsonObject { put("google_search", buildJsonObject { }) }) })
+            // A2b (§5.2): client-executed tools ride as
+            // functionDeclarations in the same tools array as the
+            // google_search grounding entry. The array is emitted
+            // only when at least one of them is present, and a
+            // search-only array renders exactly as before (the
+            // no-tools body is a byte-identical regression lock).
+            if (request.tools.isNotEmpty() || request.webSearch) {
+                put("tools", buildJsonArray {
+                    if (request.tools.isNotEmpty()) {
+                        add(buildJsonObject {
+                            put("functionDeclarations", buildJsonArray {
+                                request.tools.forEach { tool ->
+                                    add(buildJsonObject {
+                                        put("name", tool.name)
+                                        put("description", tool.description)
+                                        put("parameters", jsonObjectOrEmpty(tool.parametersJsonSchema))
+                                    })
+                                }
+                            })
+                        })
+                    }
+                    if (request.webSearch) {
+                        add(buildJsonObject { put("google_search", buildJsonObject { }) })
+                    }
+                })
             }
             put("generationConfig", buildJsonObject {
                 (request.temperature ?: runtime.config.temperature)?.let { put("temperature", it) }
@@ -107,6 +164,9 @@ class GeminiClient(
         var usage: Usage? = null
         var failure: AiError? = null
         var tokenCount = 0
+        // A2b (§5.2): functionCall parts arrive WHOLE (no fragment
+        // assembly) — collected in response order as (name, args).
+        val pendingFunctionCalls = mutableListOf<Pair<String, kotlinx.serialization.json.JsonElement?>>()
 
         Sse.stream(http, req) { err -> failure = err }.collect { frame ->
             val obj = try { json.parseToJsonElement(frame.data).jsonObjectOrNull } catch (_: Exception) { null }
@@ -132,6 +192,14 @@ class GeminiClient(
                 ?.get("parts")?.jsonArrayOrNull
                 ?.forEach { part ->
                     val partObj = part.jsonObjectOrNull
+                    // A2b (§5.2): a functionCall part is a complete
+                    // call — collect it for the end-of-stream emit.
+                    val functionCall = partObj?.get("functionCall")?.jsonObjectOrNull
+                    if (functionCall != null) {
+                        val name = functionCall["name"]?.jsonPrimitiveOrNull?.contentOrNull ?: ""
+                        val args = functionCall["args"]?.takeUnless { it is kotlinx.serialization.json.JsonNull }
+                        pendingFunctionCalls += name to args
+                    }
                     val text = partObj?.get("text")?.jsonPrimitiveOrNull?.contentOrNull
                     if (!text.isNullOrEmpty()) {
                         // v4.4 (architect feature 1): Gemini thought summaries stream with
@@ -161,10 +229,45 @@ class GeminiClient(
                 )
             }
         }
+        // A2b (§5.2 + Q6): with functionCall parts collected, emit
+        // them ONCE as ToolCallReady before Completed. Gemini calls
+        // carry no id, so one is synthesized: the counter offset is
+        // the number of tool calls already present in this request's
+        // conversation. Within a session the conversation only
+        // grows, so offsets are monotonic across turns and cannot
+        // reset on resume — the failure mode of the note's
+        // turn-index sketch. Ids are internal correlation only:
+        // Gemini matches functionResponse parts by name. Args that
+        // are not a JSON object fail with PROTOCOL — a malformed
+        // call is never silently emitted.
+        var toolCallsEmitted = false
+        if (failure == null && pendingFunctionCalls.isNotEmpty()) {
+            val malformed = pendingFunctionCalls.firstOrNull { (name, args) ->
+                name.isBlank() ||
+                    (args != null && args !is kotlinx.serialization.json.JsonObject)
+            }
+            if (malformed != null) {
+                failure = AiError(
+                    AiError.Kind.PROTOCOL,
+                    "Tool call '${malformed.first}' returned malformed arguments JSON",
+                )
+            } else {
+                val offset = request.turns.sumOf { it.toolCalls.size }
+                val assembled = pendingFunctionCalls.mapIndexed { index, (name, args) ->
+                    AiToolCall(
+                        id = "gemini-${offset + index}",
+                        name = name,
+                        argumentsJson = args?.toString() ?: "{}",
+                    )
+                }
+                emit(StreamEvent.ToolCallReady(assembled))
+                toolCallsEmitted = true
+            }
+        }
         val err = failure
         when {
             err != null -> emit(StreamEvent.Failed(err))
-            tokenCount > 0 -> emit(StreamEvent.Completed("STOP", usage))
+            tokenCount > 0 || toolCallsEmitted -> emit(StreamEvent.Completed("STOP", usage))
             else -> emit(StreamEvent.Failed(AiError(AiError.Kind.PROTOCOL, "Stream ended without content")))
         }
     }.flowOn(Dispatchers.IO)
@@ -194,6 +297,14 @@ class GeminiClient(
             }.filter { !it.id.contains("embedding") && !it.id.contains("aqa") }
         }
     }
+
+    /** A JSON string as a JSON object (empty object when unparseable or not an object). */
+    private fun jsonObjectOrEmpty(text: String): kotlinx.serialization.json.JsonObject =
+        try {
+            json.parseToJsonElement(text) as? kotlinx.serialization.json.JsonObject ?: buildJsonObject {}
+        } catch (_: Exception) {
+            buildJsonObject {}
+        }
 
     override suspend fun validateConnection(): ValidationResult {
         val t0 = System.currentTimeMillis()
