@@ -17,11 +17,13 @@ import org.junit.Assert.fail
 import org.junit.Test
 
 /**
- * A2a (§5.2/§7): the native OpenAI planner — ToolCallReady → CallTool,
- * parallel calls served sequentially from the queue, tool results fed
- * back as tool turns, provider failure surfaced as ProviderCallException.
+ * A2a (§5.2/§7): the native tool-calling planner — ToolCallReady →
+ * CallTool, parallel calls served sequentially from the queue, tool
+ * results fed back as tool turns, provider failure surfaced as
+ * ProviderCallException. (Renamed from NativeOpenAiPlanner in A2b:
+ * the planner is wire-agnostic — see WireAgnosticPlannerTest.)
  */
-class NativeOpenAiPlannerTest {
+class NativeToolCallingPlannerTest {
 
     private val context = TurnContext(sessionId = "s1", projectId = "p1", providerId = "prov", modelId = "m1")
 
@@ -46,7 +48,7 @@ class NativeOpenAiPlannerTest {
                 listOf(StreamEvent.Token("file contents"), StreamEvent.Completed("stop")),
             )
         )
-        val planner = NativeOpenAiPlanner(client, systemPrompt = "sys", prompt = "read a.txt")
+        val planner = NativeToolCallingPlanner(client, systemPrompt = "sys", prompt = "read a.txt")
 
         val first = planner.nextAction(context, emptyList(), CoreTools.ALL)
         assertEquals(PlannedAction.CallTool(ToolCall("call_1", "read", """{"path":"a.txt"}""")), first)
@@ -75,7 +77,7 @@ class NativeOpenAiPlannerTest {
             AiToolCall("c1", "bash", """{"command":"ls"}"""),
         )
         val client = FakeClient(listOf(listOf(StreamEvent.ToolCallReady(calls), StreamEvent.Completed("tool_calls"))))
-        val planner = NativeOpenAiPlanner(client, systemPrompt = "sys", prompt = "go")
+        val planner = NativeToolCallingPlanner(client, systemPrompt = "sys", prompt = "go")
 
         assertEquals(PlannedAction.CallTool(ToolCall("c0", "read", "{}")), planner.nextAction(context, emptyList(), CoreTools.ALL))
         assertEquals(
@@ -88,7 +90,7 @@ class NativeOpenAiPlannerTest {
     @Test fun providerFailureThrowsProviderCallException() = runBlocking {
         val cause = AiError(AiError.Kind.RATE_LIMIT, "slow down")
         val client = FakeClient(listOf(listOf(StreamEvent.Failed(cause))))
-        val planner = NativeOpenAiPlanner(client, systemPrompt = "sys", prompt = "hi")
+        val planner = NativeToolCallingPlanner(client, systemPrompt = "sys", prompt = "hi")
 
         try {
             planner.nextAction(context, emptyList(), CoreTools.ALL)
@@ -102,7 +104,7 @@ class NativeOpenAiPlannerTest {
         val client = FakeClient(
             listOf(listOf(StreamEvent.Token("Hel"), StreamEvent.Token("lo"), StreamEvent.Completed("stop")))
         )
-        val planner = NativeOpenAiPlanner(client, systemPrompt = "sys", prompt = "hi")
+        val planner = NativeToolCallingPlanner(client, systemPrompt = "sys", prompt = "hi")
 
         val action = planner.nextAction(context, emptyList(), CoreTools.ALL)
 

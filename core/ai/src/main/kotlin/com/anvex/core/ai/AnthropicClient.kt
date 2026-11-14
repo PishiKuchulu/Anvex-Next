@@ -53,28 +53,57 @@ class AnthropicClient(
     }
 
     override fun streamChat(request: ChatRequest): Flow<StreamEvent> = flow {
-        val lastUserIndex = request.turns.indexOfLast { it.role == MessageRole.USER }
+        // A2b: tool-result turns also carry MessageRole.USER (see
+        // ChatTurn) but are not user messages — attachments belong to
+        // real user turns (mirrors the OpenAI client).
+        val lastUserIndex = request.turns.indexOfLast { it.role == MessageRole.USER && it.toolCallId == null }
         val messages = buildJsonArray {
             request.turns.forEachIndexed { index, turn ->
                 val isLastUser = turn.role == MessageRole.USER && index == lastUserIndex
                 add(buildJsonObject {
                     put("role", if (turn.role == MessageRole.USER) "user" else "assistant")
-                    if (isLastUser && request.attachments.isNotEmpty()) {
-                        put("content", buildJsonArray {
-                            add(buildJsonObject { put("type", "text"); put("text", turn.content) })
-                            request.attachments.forEach { a ->
-                                when {
-                                    a.isImage && a.base64 != null -> add(buildJsonObject {
-                                        put("type", "image")
-                                        put("source", buildJsonObject {
-                                            put("type", "base64"); put("media_type", a.mimeType); put("data", a.base64)
-                                        })
-                                    })
-                                    !a.text.isNullOrBlank() -> add(buildJsonObject { put("type", "text"); put("text", "\n[Attachment: ${a.name}]\n${a.text}") })
-                                }
+                    // A2b (§5.2): native tool-calling turn shapes. Plain
+                    // turns render exactly as before (byte-identical
+                    // no-tools requests are a regression lock).
+                    when {
+                        turn.toolCallId != null -> put("content", buildJsonArray {
+                            add(buildJsonObject {
+                                put("type", "tool_result")
+                                put("tool_use_id", turn.toolCallId)
+                                put("content", turn.content)
+                            })
+                        })
+                        turn.toolCalls.isNotEmpty() -> put("content", buildJsonArray {
+                            if (turn.content.isNotBlank()) {
+                                add(buildJsonObject { put("type", "text"); put("text", turn.content) })
+                            }
+                            turn.toolCalls.forEach { call ->
+                                add(buildJsonObject {
+                                    put("type", "tool_use")
+                                    put("id", call.id)
+                                    put("name", call.name)
+                                    put("input", jsonObjectOrEmpty(call.argumentsJson))
+                                })
                             }
                         })
-                    } else put("content", turn.content)
+                        isLastUser && request.attachments.isNotEmpty() -> {
+                            put("content", buildJsonArray {
+                                add(buildJsonObject { put("type", "text"); put("text", turn.content) })
+                                request.attachments.forEach { a ->
+                                    when {
+                                        a.isImage && a.base64 != null -> add(buildJsonObject {
+                                            put("type", "image")
+                                            put("source", buildJsonObject {
+                                                put("type", "base64"); put("media_type", a.mimeType); put("data", a.base64)
+                                            })
+                                        })
+                                        !a.text.isNullOrBlank() -> add(buildJsonObject { put("type", "text"); put("text", "\n[Attachment: ${a.name}]\n${a.text}") })
+                                    }
+                                }
+                            })
+                        }
+                        else -> put("content", turn.content)
+                    }
                 })
             }
         }
@@ -95,13 +124,27 @@ class AnthropicClient(
                 put("system", request.systemPrompt)
             }
             put("messages", messages)
-            if (request.webSearch) {
+            // A2b (§5.2): client-executed tools and the web_search
+            // server tool coexist in one tools array. The array is
+            // emitted only when at least one of them is present, and
+            // a web-search-only array renders exactly as before (the
+            // no-tools body is a byte-identical regression lock).
+            if (request.tools.isNotEmpty() || request.webSearch) {
                 put("tools", buildJsonArray {
-                    add(buildJsonObject {
-                        put("type", "web_search_20250305")
-                        put("name", "web_search")
-                        put("max_uses", 3)
-                    })
+                    request.tools.forEach { tool ->
+                        add(buildJsonObject {
+                            put("name", tool.name)
+                            put("description", tool.description)
+                            put("input_schema", jsonObjectOrEmpty(tool.parametersJsonSchema))
+                        })
+                    }
+                    if (request.webSearch) {
+                        add(buildJsonObject {
+                            put("type", "web_search_20250305")
+                            put("name", "web_search")
+                            put("max_uses", 3)
+                        })
+                    }
                 })
             }
             put("stream", true)
@@ -142,6 +185,10 @@ class AnthropicClient(
         var tokenCount = 0
         var stopReason: String? = null
         var sawStop = false
+        // A2b (§5.2): tool_use blocks accumulate per block index — id
+        // and name arrive with content_block_start, the arguments as
+        // input_json_delta fragments.
+        val pendingToolCalls = sortedMapOf<Int, ToolUseFragments>()
 
         Sse.stream(http, req) { err -> failure = err }.collect { frame ->
             val obj = try { json.parseToJsonElement(frame.data).jsonObjectOrNull } catch (_: Exception) { null }
@@ -166,6 +213,15 @@ class AnthropicClient(
                             val thought = delta["thinking"]?.jsonPrimitiveOrNull?.contentOrNull
                             if (!thought.isNullOrEmpty()) emit(StreamEvent.Reasoning(thought))
                         }
+                        // A2b (§5.2): a tool call's arguments stream as
+                        // partial-JSON fragments on its block index.
+                        "input_json_delta" -> {
+                            val index = obj["index"]?.jsonPrimitiveOrNull?.contentOrNull?.toIntOrNull()
+                            val partial = delta["partial_json"]?.jsonPrimitiveOrNull?.contentOrNull
+                            if (index != null && partial != null) {
+                                pendingToolCalls[index]?.arguments?.append(partial)
+                            }
+                        }
                     }
                 }
                 "message_delta" -> {
@@ -178,13 +234,25 @@ class AnthropicClient(
                 }
                 "content_block_start" -> {
                     val block = obj["content_block"]?.jsonObjectOrNull
-                    if (block?.get("type")?.jsonPrimitiveOrNull?.contentOrNull == "web_search_tool_result") {
-                        val sources = block["content"]?.jsonArrayOrNull?.mapNotNull { r ->
-                            val o = r.jsonObjectOrNull ?: return@mapNotNull null
-                            val url = o["url"]?.jsonPrimitiveOrNull?.contentOrNull ?: return@mapNotNull null
-                            WebSource(o["title"]?.jsonPrimitiveOrNull?.contentOrNull.orEmpty(), url)
-                        }.orEmpty()
-                        if (sources.isNotEmpty()) emit(StreamEvent.Sources(sources))
+                    when (block?.get("type")?.jsonPrimitiveOrNull?.contentOrNull) {
+                        "web_search_tool_result" -> {
+                            val sources = block["content"]?.jsonArrayOrNull?.mapNotNull { r ->
+                                val o = r.jsonObjectOrNull ?: return@mapNotNull null
+                                val url = o["url"]?.jsonPrimitiveOrNull?.contentOrNull ?: return@mapNotNull null
+                                WebSource(o["title"]?.jsonPrimitiveOrNull?.contentOrNull.orEmpty(), url)
+                            }.orEmpty()
+                            if (sources.isNotEmpty()) emit(StreamEvent.Sources(sources))
+                        }
+                        // A2b (§5.2): a tool_use block opens a pending
+                        // call; its arguments follow as deltas.
+                        "tool_use" -> {
+                            val index = obj["index"]?.jsonPrimitiveOrNull?.contentOrNull?.toIntOrNull()
+                            if (index != null) {
+                                val acc = pendingToolCalls.getOrPut(index) { ToolUseFragments() }
+                                acc.id = block["id"]?.jsonPrimitiveOrNull?.contentOrNull
+                                acc.name = block["name"]?.jsonPrimitiveOrNull?.contentOrNull
+                            }
+                        }
                     }
                 }
                 "message_stop" -> sawStop = true
@@ -195,10 +263,42 @@ class AnthropicClient(
                 }
             }
         }
+        // A2b (§5.2): with tool_use blocks assembled (stop_reason
+        // "tool_use", or stream end with blocks pending), emit them
+        // ONCE as ToolCallReady before Completed. Assembled arguments
+        // that are not a valid JSON object fail the turn with
+        // PROTOCOL — a malformed call is never silently emitted
+        // (the OpenAI client's rule, §5.2 error shapes).
+        var toolCallsEmitted = false
+        if (failure == null && pendingToolCalls.isNotEmpty()) {
+            val assembled = pendingToolCalls.values.map { acc ->
+                AiToolCall(
+                    id = acc.id ?: "",
+                    name = acc.name ?: "",
+                    argumentsJson = acc.arguments.toString().ifBlank { "{}" },
+                )
+            }
+            val malformed = assembled.firstOrNull { call ->
+                call.name.isBlank() || try {
+                    json.parseToJsonElement(call.argumentsJson) !is kotlinx.serialization.json.JsonObject
+                } catch (_: Exception) {
+                    true
+                }
+            }
+            if (malformed != null) {
+                failure = AiError(
+                    AiError.Kind.PROTOCOL,
+                    "Tool call '${malformed.name}' returned malformed arguments JSON",
+                )
+            } else {
+                emit(StreamEvent.ToolCallReady(assembled))
+                toolCallsEmitted = true
+            }
+        }
         val err = failure
         when {
             err != null -> emit(StreamEvent.Failed(err))
-            sawStop || tokenCount > 0 -> emit(StreamEvent.Completed(stopReason, usage))
+            sawStop || tokenCount > 0 || toolCallsEmitted -> emit(StreamEvent.Completed(stopReason, usage))
             else -> emit(StreamEvent.Failed(AiError(AiError.Kind.PROTOCOL, "Stream ended without content")))
         }
     }.flowOn(Dispatchers.IO)
@@ -257,6 +357,21 @@ class AnthropicClient(
             ValidationResult(false, System.currentTimeMillis() - t0, "Network error: ${e.message ?: "unreachable"}")
         }
     }
+
+    /** A2b (§5.2): streaming fragments of one tool_use block, accumulated per block index. */
+    private class ToolUseFragments {
+        var id: String? = null
+        var name: String? = null
+        val arguments = StringBuilder()
+    }
+
+    /** A JSON string as a JSON object (empty object when unparseable or not an object). */
+    private fun jsonObjectOrEmpty(text: String): kotlinx.serialization.json.JsonObject =
+        try {
+            json.parseToJsonElement(text) as? kotlinx.serialization.json.JsonObject ?: buildJsonObject {}
+        } catch (_: Exception) {
+            buildJsonObject {}
+        }
 
     /** Anthropic splits usage across message_start / message_delta — merge per field. */
     private fun mergeUsage(current: Usage?, update: Usage): Usage = Usage(

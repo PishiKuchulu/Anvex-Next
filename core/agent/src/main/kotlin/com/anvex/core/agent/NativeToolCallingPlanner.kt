@@ -18,10 +18,18 @@ class ProviderCallException(val error: AiError) : Exception(error.message)
 
 /**
  * The native tool-calling [ActionPlanner] strategy (A2 design note
- * §5.2, OpenAI wire format): the turn's [ProviderClient] is asked with
- * the core tools attached; a [StreamEvent.ToolCallReady] becomes a
+ * §5.2): the turn's [ProviderClient] is asked with the core tools
+ * attached; a [StreamEvent.ToolCallReady] becomes a
  * [PlannedAction.CallTool], streamed text becomes
  * [PlannedAction.Respond].
+ *
+ * The planner is WIRE-AGNOSTIC (A2b): it speaks only the
+ * [ProviderClient] / [StreamEvent] boundary — no wire-format logic
+ * lives here. Each client (OpenAI-compatible, Anthropic, Gemini)
+ * renders [ChatRequest.tools] into its native tool format and
+ * assembles its streaming fragments into [StreamEvent.ToolCallReady]
+ * internally (Q7), so this one planner drives all three formats
+ * unchanged (locked by WireAgnosticPlannerTest).
  *
  * One instance serves ONE turn: the bridge/wiring constructs it with
  * the turn's [prompt] (and any [priorTurns] from earlier turns) because
@@ -40,7 +48,7 @@ class ProviderCallException(val error: AiError) : Exception(error.message)
  * token-by-token streaming through [ActionPlanner] is a pre-A3 design
  * item; this class does not change the A1 contract.
  */
-class NativeOpenAiPlanner(
+class NativeToolCallingPlanner(
     private val client: ProviderClient,
     private val systemPrompt: String,
     private val prompt: String,
