@@ -147,6 +147,30 @@ object SensitivePaths {
     }
 
     /**
+     * A2a-0 (§4 extraction): the ONE protected-path test for agent
+     * mutations — app/VCS metadata segments (`.git`, `.anvex`,
+     * `.anvex-pi`, `.pi`) at any depth, plus any `.github/workflows`
+     * subtree (see [isWorkflowPath]). `.pi` is protected because Pi
+     * discovers project-local extensions/skills/prompts under it
+     * (SEC-004): an agent write there would plant code for the next
+     * Pi launch. This test previously existed as two hand-mirrored
+     * private copies (ActionDispatcher, PiToolMapping); both now
+     * delegate here so the set cannot drift.
+     *
+     * Normalization contract: backslashes ARE path separators here —
+     * they are normalized to `/` before segment matching, because
+     * consumers hand this check RAW, unsanitized tool paths where
+     * `sub\.git\config` must still match. A blank path is NOT
+     * protected (returns false): blank handling belongs to callers.
+     */
+    fun isProtectedPath(path: String): Boolean {
+        if (path.isBlank()) return false
+        val parts = path.replace('\\', '/').split('/')
+        if (parts.any { it == ".git" || it == ".anvex" || it == ".anvex-pi" || it == ".pi" }) return true
+        return isWorkflowPath(path)
+    }
+
+    /**
      * v4.10.5 follow-up: reads of extracted zip attachments. 4.10.5 extracts
      * attached zips into .anvex/attachments/<digest>-extracted/ so the agent
      * can review them — but [isSensitive] blocks every path under .anvex/,
