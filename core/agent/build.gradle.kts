@@ -9,10 +9,14 @@ kotlin {
 }
 
 dependencies {
-    // Contract types need Flow/suspend only. The architecture map ALLOWS
-    // :core:agent -> :core:engine/:core:ai/:core:model, but the A1 contracts
-    // reference none of their types (TurnContext uses opaque ids), so no
-    // project dependencies are declared yet — A2 adds them when it needs them.
+    // A2 (design note §2/§3, rule D2 — declare only on real reference):
+    // AiError appears in :core:agent's PUBLIC API (AgentError.Provider,
+    // carried by the public TurnFailed event), so :core:ai is `api`.
+    // :core:engine types (BoltAction/ActionSafetyPolicy/CoreToolActions)
+    // stay internal to the loop's gate, never in a public contract type,
+    // so :core:engine is `implementation`.
+    api(project(":core:ai"))
+    implementation(project(":core:engine"))
     api(libs.kotlinx.coroutines.core)
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)

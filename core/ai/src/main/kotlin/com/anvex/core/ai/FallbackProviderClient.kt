@@ -51,6 +51,10 @@ class FallbackProviderClient(
                         is StreamEvent.Failed -> failed = event.error
                         is StreamEvent.Started -> Unit
                         is StreamEvent.Sources -> pending.add(event)
+                        // A2: a completed tool-call batch also proves the
+                        // attempt is live; buffer it like Sources so a
+                        // failed attempt's calls never leak downstream.
+                        is StreamEvent.ToolCallReady -> pending.add(event)
                     }
                 }
             } catch (e: kotlinx.coroutines.CancellationException) {

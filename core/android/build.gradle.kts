@@ -289,6 +289,9 @@ dependencies {
     implementation(project(":core:model"))
     implementation(project(":core:engine"))
     implementation(project(":core:ai"))
+    // A2a (design note §3, rule D2): the ToolExecutor implementation
+    // lives here; :core:agent never depends back on :core:android.
+    implementation(project(":core:agent"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.kotlinx.coroutines.android)

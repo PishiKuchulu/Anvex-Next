@@ -704,6 +704,12 @@ class ChatSession(
                                 is com.anvex.core.ai.StreamEvent.Sources -> event.sources.forEach {
                                     if (!turnSources.containsKey(it.url)) turnSources[it.url] = it
                                 }
+                                // A2: ChatSession never sends tools (the
+                                // native loop is not wired here until A3),
+                                // so a completed tool-call batch cannot
+                                // occur on this path; the branch exists
+                                // because StreamEvent is sealed.
+                                is com.anvex.core.ai.StreamEvent.ToolCallReady -> Unit
                             }
                         }
                         // flush may emit a final prose delta (pending action content)

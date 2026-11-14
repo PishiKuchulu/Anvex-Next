@@ -1,5 +1,6 @@
 package com.anvex.core.agent
 
+import com.anvex.core.ai.AiError
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.toList
@@ -43,6 +44,11 @@ class AgentContractsTest {
         }
     }
 
+    private class DenyingGateway : ApprovalGateway {
+        override suspend fun requestApproval(request: ApprovalRequest): ApprovalDecision =
+            ApprovalDecision.Denied("no")
+    }
+
     private class FakeProgressStore : ProgressStore {
         val notes = mutableMapOf<String, String>()
         override suspend fun load(key: String): String? = notes[key]
@@ -80,7 +86,7 @@ class AgentContractsTest {
                                 is ApprovalDecision.Approved -> publish(AgentEvent.ToolCallApproved(call.id))
                                 is ApprovalDecision.Denied -> {
                                     publish(AgentEvent.ToolCallDenied(call.id))
-                                    publish(AgentEvent.TurnFailed("denied"))
+                                    publish(AgentEvent.TurnFailed(turnId, AgentError.Policy("denied")))
                                     return@flow
                                 }
                             }
@@ -117,6 +123,32 @@ class AgentContractsTest {
         )
         assertEquals(1, gateway.requests.size)
         assertEquals(CoreTools.BASH, gateway.requests.single().call.toolName)
+    }
+
+    @Test fun userDenialEndsTurnWithTypedPolicyFailure() = runBlocking {
+        val engine = FakeEngine(FakePlanner(), DenyingGateway())
+
+        val events = engine.runTurn(context, "list files").toList()
+
+        assertEquals(
+            listOf("TurnStarted", "ToolCallProposed", "ToolCallDenied", "TurnFailed"),
+            events.map { it::class.simpleName },
+        )
+        val failed = events.last() as AgentEvent.TurnFailed
+        assertEquals("turn-1", failed.turnId)
+        assertEquals(AgentError.Policy("denied"), failed.error)
+        assertEquals("denied", failed.error.message)
+    }
+
+    @Test fun agentErrorMessageDelegatesPerVariant() {
+        // Addendum (a): Provider.message is the provider error's userTitle,
+        // never the raw diagnostic message.
+        val cause = AiError(AiError.Kind.NETWORK, "raw socket detail")
+        assertEquals(cause.userTitle, AgentError.Provider(cause).message)
+        assertFalse(AgentError.Provider(cause).message.contains("raw socket detail"))
+        assertEquals("denied", AgentError.Policy("denied").message)
+        assertEquals("read failed", AgentError.Tool("read", "read failed").message)
+        assertEquals("loop bug", AgentError.Internal("loop bug").message)
     }
 
     @Test fun progressStoreRoundTripsNotes() = runBlocking {

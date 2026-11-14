@@ -15,8 +15,49 @@ data class ProviderRuntimeConfig(
         "ProviderRuntimeConfig(provider=${config.name}, kind=${config.kind}, model=${config.model}, apiKey=${maskApiKey(apiKey)}, extraHeaderNames=${config.extraHeaders.keys})"
 }
 
+/**
+ * One tool call in a conversation (A2 design note §5.1): carried on an
+ * assistant [ChatTurn.toolCalls] and reported by clients in
+ * [StreamEvent.ToolCallReady]. [argumentsJson] is the call's arguments
+ * as a single JSON object string (clients assemble streaming fragments
+ * internally — raw deltas are never exposed).
+ */
 @Serializable
-data class ChatTurn(val role: MessageRole, val content: String)
+data class AiToolCall(
+    val id: String,
+    val name: String,
+    val argumentsJson: String,
+)
+
+/**
+ * A2 (§5.1): the wire-neutral tool definition a client renders into its
+ * provider's native tool format. It deliberately mirrors
+ * `:core:agent`'s `ToolSpec` fields — `:core:ai` may not depend on
+ * `:core:agent`, so the loop/bridge converts `ToolSpec → AiToolDefinition`.
+ */
+data class AiToolDefinition(
+    val name: String,
+    val description: String,
+    val parametersJsonSchema: String,
+)
+
+@Serializable
+data class ChatTurn(
+    val role: MessageRole,
+    val content: String,
+    /**
+     * A2 (§5.1): tool calls made by this assistant turn (empty for plain
+     * turns). Each client renders them into its format's native shape.
+     */
+    val toolCalls: List<AiToolCall> = emptyList(),
+    /**
+     * A2 (§5.1): when non-null, this turn is the result of the tool call
+     * with this id (its [content] is the tool output). Anthropic renders
+     * tool results inside user turns, so a result turn keeps
+     * [MessageRole.USER] and is distinguished by this id alone.
+     */
+    val toolCallId: String? = null,
+)
 
 data class ChatRequest(
     val systemPrompt: String,
@@ -27,6 +68,12 @@ data class ChatRequest(
     val thinkingLevel: ThinkingLevel = ThinkingLevel.NORMAL,
     /** Phase 4.2: ask the provider to use its native web search (only Anthropic and Gemini honor it). */
     val webSearch: Boolean = false,
+    /**
+     * A2 (§5.1): client-executed tools offered to the model (native
+     * tool-calling). Defaulted empty: every existing caller is
+     * unaffected and no client emits tool events for such requests.
+     */
+    val tools: List<AiToolDefinition> = emptyList(),
 ) {
     override fun toString(): String =
         "ChatRequest(systemPromptLength=${systemPrompt.length}, turns=${turns.size}, attachments=${attachments.size}, maxTokens=$maxTokens, temperature=$temperature, thinkingLevel=$thinkingLevel)"
@@ -57,6 +104,15 @@ sealed class StreamEvent {
     ) : StreamEvent()
     data class Failed(val error: AiError) : StreamEvent()
     data class Sources(val sources: List<WebSource>) : StreamEvent()
+
+    /**
+     * A2 (§5.1, Q7 CONFIRMED): the model requested tool calls and the
+     * client has assembled the streaming fragments into complete
+     * [calls]. Emitted once, just before [Completed]; raw per-delta
+     * tool fragments are never exposed, so existing consumers stay
+     * untouched whenever no tools are requested.
+     */
+    data class ToolCallReady(val calls: List<AiToolCall>) : StreamEvent()
 }
 
 data class ChatAttachment(

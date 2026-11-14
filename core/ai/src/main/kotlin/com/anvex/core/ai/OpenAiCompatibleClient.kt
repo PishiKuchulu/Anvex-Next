@@ -43,7 +43,11 @@ class OpenAiCompatibleClient(
     }
 
     override fun streamChat(request: ChatRequest): Flow<StreamEvent> = flow {
-        val lastUserIndex = request.turns.indexOfLast { it.role == com.anvex.core.model.MessageRole.USER }
+        // A2: tool-result turns also carry MessageRole.USER (see ChatTurn)
+        // but are not user messages — attachments belong to real user turns.
+        val lastUserIndex = request.turns.indexOfLast {
+            it.role == com.anvex.core.model.MessageRole.USER && it.toolCallId == null
+        }
         val messages = buildJsonArray {
             add(buildJsonObject {
                 put("role", "system"); put("content", request.systemPrompt)
@@ -51,6 +55,32 @@ class OpenAiCompatibleClient(
             request.turns.forEachIndexed { index, turn ->
                 val isLastUser = turn.role == com.anvex.core.model.MessageRole.USER && index == lastUserIndex
                 add(buildJsonObject {
+                    // A2 (§5.2): native tool-calling turn shapes. Plain
+                    // turns render exactly as before (byte-identical
+                    // no-tools requests are a regression lock).
+                    when {
+                        turn.toolCallId != null -> {
+                            put("role", "tool")
+                            put("tool_call_id", turn.toolCallId)
+                            put("content", turn.content)
+                        }
+                        turn.toolCalls.isNotEmpty() -> {
+                            put("role", "assistant")
+                            put("content", kotlinx.serialization.json.JsonNull)
+                            put("tool_calls", buildJsonArray {
+                                turn.toolCalls.forEach { call ->
+                                    add(buildJsonObject {
+                                        put("id", call.id)
+                                        put("type", "function")
+                                        put("function", buildJsonObject {
+                                            put("name", call.name)
+                                            put("arguments", call.argumentsJson)
+                                        })
+                                    })
+                                }
+                            })
+                        }
+                        else -> {
                     put("role", if (turn.role == com.anvex.core.model.MessageRole.USER) "user" else "assistant")
                     if (isLastUser && request.attachments.isNotEmpty()) {
                         put("content", buildJsonArray {
@@ -68,6 +98,8 @@ class OpenAiCompatibleClient(
                             }
                         })
                     } else put("content", turn.content)
+                        }
+                    }
                 })
             }
         }
@@ -91,7 +123,8 @@ class OpenAiCompatibleClient(
         }
         when {
             outcome.failure != null -> emit(StreamEvent.Failed(outcome.failure))
-            outcome.sawDone || outcome.tokenCount > 0 -> emit(StreamEvent.Completed(outcome.finishReason, outcome.usage))
+            outcome.sawDone || outcome.tokenCount > 0 || outcome.toolCallsEmitted ->
+                emit(StreamEvent.Completed(outcome.finishReason, outcome.usage))
             else -> emit(StreamEvent.Failed(AiError(AiError.Kind.PROTOCOL, "Stream ended without content")))
         }
     }.flowOn(Dispatchers.IO)
@@ -102,7 +135,24 @@ class OpenAiCompatibleClient(
         val tokenCount: Int,
         val finishReason: String?,
         val usage: Usage?,
+        /** A2: a [StreamEvent.ToolCallReady] was emitted by this attempt. */
+        val toolCallsEmitted: Boolean = false,
     )
+
+    /** A2 (§5.2): streaming fragments of one tool call, accumulated per delta `index`. */
+    private class ToolCallFragments {
+        var id: String? = null
+        var name: String? = null
+        val arguments = StringBuilder()
+    }
+
+    /** A tool definition's JSON-Schema string as a JSON object (empty object when unparseable). */
+    private fun parseToolParameters(schema: String): JsonObject =
+        try {
+            json.parseToJsonElement(schema) as? JsonObject ?: buildJsonObject {}
+        } catch (_: Exception) {
+            buildJsonObject {}
+        }
 
     /**
      * Provider vocabulary for this endpoint's reasoning knob. OpenAI and
@@ -146,6 +196,23 @@ class OpenAiCompatibleClient(
         val body = buildJsonObject {
             put("model", runtime.config.model)
             put("messages", messages)
+            // A2 (§5.2): native tool-calling. Only sent when tools are
+            // offered — a no-tools body stays byte-identical (lock test).
+            if (request.tools.isNotEmpty()) {
+                put("tools", buildJsonArray {
+                    request.tools.forEach { tool ->
+                        add(buildJsonObject {
+                            put("type", "function")
+                            put("function", buildJsonObject {
+                                put("name", tool.name)
+                                put("description", tool.description)
+                                put("parameters", parseToolParameters(tool.parametersJsonSchema))
+                            })
+                        })
+                    }
+                })
+                put("tool_choice", "auto")
+            }
             put("stream", true)
             // M-16: without stream_options.include_usage, OpenAI/OpenRouter
             // never send usage, so token/cost accounting stays empty.
@@ -172,6 +239,9 @@ class OpenAiCompatibleClient(
         var failure: AiError? = null
         var sawDone = false
         var tokenCount = 0
+        // A2 (§5.2): tool-call fragments accumulate per delta index
+        // (id + name arrive on the first fragment, arguments concatenate).
+        val pendingToolCalls = sortedMapOf<Int, ToolCallFragments>()
 
         val events = Sse.stream(http, req) { err -> failure = err }
 
@@ -198,11 +268,52 @@ class OpenAiCompatibleClient(
                 val reasoning = delta?.get("reasoning_content")?.jsonPrimitiveOrNull?.contentOrNull
                     ?: delta?.get("reasoning")?.jsonPrimitiveOrNull?.contentOrNull
                 if (!reasoning.isNullOrEmpty()) emit(StreamEvent.Reasoning(reasoning))
+                delta?.get("tool_calls")?.jsonArrayOrNull?.forEach { el ->
+                    val callObj = el.jsonObjectOrNull ?: return@forEach
+                    val index = callObj["index"]?.jsonPrimitiveOrNull?.contentOrNull?.toIntOrNull()
+                        ?: return@forEach
+                    val acc = pendingToolCalls.getOrPut(index) { ToolCallFragments() }
+                    callObj["id"]?.jsonPrimitiveOrNull?.contentOrNull?.let { acc.id = it }
+                    val fn = callObj["function"]?.jsonObjectOrNull
+                    fn?.get("name")?.jsonPrimitiveOrNull?.contentOrNull?.let { acc.name = it }
+                    fn?.get("arguments")?.jsonPrimitiveOrNull?.contentOrNull?.let { acc.arguments.append(it) }
+                }
                 choice["finish_reason"]?.jsonPrimitiveOrNull?.contentOrNull?.let { finishReason = it }
             }
             usage = obj["usage"]?.let { parseUsage(it) } ?: usage
         }
-        return AttemptOutcome(failure, sawDone, tokenCount, finishReason, usage)
+        // A2 (§5.2): on finish_reason "tool_calls" — or stream end with
+        // fragments pending — the assembled calls are emitted ONCE as
+        // ToolCallReady (before the caller's Completed). Assembled
+        // arguments that are not a valid JSON object fail the turn with
+        // PROTOCOL: a malformed call is never silently emitted.
+        var toolCallsEmitted = false
+        if (failure == null && pendingToolCalls.isNotEmpty()) {
+            val assembled = pendingToolCalls.values.map { acc ->
+                AiToolCall(
+                    id = acc.id ?: "",
+                    name = acc.name ?: "",
+                    argumentsJson = acc.arguments.toString().ifBlank { "{}" },
+                )
+            }
+            val malformed = assembled.firstOrNull { call ->
+                call.name.isBlank() || try {
+                    json.parseToJsonElement(call.argumentsJson) !is JsonObject
+                } catch (_: Exception) {
+                    true
+                }
+            }
+            if (malformed != null) {
+                failure = AiError(
+                    AiError.Kind.PROTOCOL,
+                    "Tool call '${malformed.name}' returned malformed arguments JSON",
+                )
+            } else {
+                emit(StreamEvent.ToolCallReady(assembled))
+                toolCallsEmitted = true
+            }
+        }
+        return AttemptOutcome(failure, sawDone, tokenCount, finishReason, usage, toolCallsEmitted)
     }
 
     override suspend fun listModels(): List<ModelInfo> = executeModelsCall()
