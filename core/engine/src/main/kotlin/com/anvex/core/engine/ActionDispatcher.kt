@@ -219,22 +219,13 @@ class ActionDispatcher(
      * app's own per-project state directory. Reads stay allowed (the agent
      * legitimately reads `.anvex/attachments/...`); writes/deletes/renames
      * through this dispatcher are refused.
-     * H-03/H-07: `.anvex-pi` (the Pi extension code the agent must not
-     * rewrite) and the `.github/workflows` subtree (workflows run with the
-     * signing secrets) join the protected set.
+     * A2a-0 (§4 extraction): the protected-set test itself now lives ONCE
+     * in [SensitivePaths.isProtectedPath] — this delegate keeps the call
+     * sites unchanged. Every call site passes PathSanitizer output
+     * (already backslash-normalized, never blank), so the shared
+     * primitive's normalization is the identity on this path.
      */
-    private fun isProtectedPath(path: String): Boolean {
-        val parts = path.split('/')
-        // SEC-004 (forensic audit, 2026-11-07): `.pi` joins the set — Pi
-        // discovers project-local extensions/skills/prompts under it, so
-        // agent writes there would plant code for the next Pi launch.
-        if (parts.any { it == ".git" || it == ".anvex" || it == ".anvex-pi" || it == ".pi" }) return true
-        // Same definition as SensitivePaths (a `.github/workflows` pair at
-        // ANY depth): a nested project's workflows run with the same
-        // repository secrets as the root ones, so the old root-anchored
-        // check left them writable by the agent.
-        return SensitivePaths.isWorkflowPath(path)
-    }
+    private fun isProtectedPath(path: String): Boolean = SensitivePaths.isProtectedPath(path)
 
     private fun protectedFailure(path: String, t0: Long): ActionResult =
         ActionResult(false, null, "Protected path (app/VCS metadata): '$path'", emptyList(), elapsed(t0), com.anvex.core.model.ActionStatus.FAILED)

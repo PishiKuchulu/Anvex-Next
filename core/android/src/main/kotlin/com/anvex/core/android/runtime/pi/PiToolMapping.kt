@@ -1,6 +1,7 @@
 package com.anvex.core.android.runtime.pi
 
 import com.anvex.core.engine.BoltAction
+import com.anvex.core.engine.CoreToolActions
 import com.anvex.core.engine.PathSanitizer
 import com.anvex.core.engine.SensitivePaths
 import java.io.File
@@ -31,19 +32,30 @@ object PiToolMapping {
     fun toBoltAction(toolName: String, input: JSONObject): BoltAction {
         val inputJson = input.toString()
         return when {
-            toolName == "write" -> BoltAction.FileAction(
+            // A2a-0 (§4 extraction): the four shared tools delegate to
+            // the ONE mapping primitive in :core:engine; only the
+            // JSONObject field extraction stays here.
+            toolName == "write" -> CoreToolActions.toBoltAction(
+                toolName,
+                path = input.optString("path"),
                 content = input.optString("content"),
-                filePath = input.optString("path"),
             )
-            toolName == "edit" -> BoltAction.FileAction(
+            toolName == "edit" -> CoreToolActions.toBoltAction(
+                toolName,
+                path = input.optString("path"),
                 // The fingerprint must cover the mutation; the edits array
                 // stands in for the resulting content (Pi applies old->new
                 // replacements itself after approval).
                 content = input.optJSONArray("edits")?.toString() ?: inputJson,
-                filePath = input.optString("path"),
             )
-            toolName == "bash" -> BoltAction.ShellAction(content = input.optString("command"))
-            toolName == "read" -> BoltAction.ToolAction("read", input.optString("path"))
+            toolName == "bash" -> CoreToolActions.toBoltAction(
+                toolName,
+                command = input.optString("command"),
+            )
+            toolName == "read" -> CoreToolActions.toBoltAction(
+                toolName,
+                path = input.optString("path"),
+            )
             toolName == "grep" -> BoltAction.ToolAction(
                 "search",
                 listOf(input.optString("pattern"), input.optString("path")).filter { it.isNotBlank() }.joinToString(" in "),
@@ -99,20 +111,16 @@ object PiToolMapping {
     }
 
     /**
-     * The native dispatcher's protected set (ActionDispatcher.isProtectedPath):
+     * The shared protected set ([SensitivePaths.isProtectedPath]):
      * app/VCS metadata segments at any depth, plus any `.github/workflows`
      * subtree (those files run with repository secrets). Blank paths are
-     * not protected here — pathDenied/Pi itself handles those.
-     * SEC-004 (forensic audit, 2026-11-07): `.pi` joins the set — Pi
-     * discovers project-local extensions/skills/prompts under `<cwd>/.pi`,
-     * so the agent must never be able to plant them for the next launch.
+     * not protected — pathDenied/Pi itself handles those.
+     * A2a-0 (§4 extraction): this used to be a hand-mirrored private copy
+     * of the dispatcher's test; it now delegates to the one primitive in
+     * :core:engine, whose Pi-form semantics (blank guard + backslash
+     * normalization) are the ones this raw-JSON-path caller always had.
      */
-    private fun protectedPath(path: String): Boolean {
-        if (path.isBlank()) return false
-        val parts = path.replace('\\', '/').split('/')
-        if (parts.any { it == ".git" || it == ".anvex" || it == ".anvex-pi" || it == ".pi" }) return true
-        return SensitivePaths.isWorkflowPath(path)
-    }
+    private fun protectedPath(path: String): Boolean = SensitivePaths.isProtectedPath(path)
 
     /** True when [path] must not be touched: blank is not denied (Pi fails itself), otherwise sensitive or escaping. */
     private fun pathDenied(path: String, projectRoot: File?, sensitiveDenied: Boolean): Boolean {
