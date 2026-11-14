@@ -33,6 +33,11 @@ sealed interface AgentEvent {
     /** Terminal event: the turn finished normally. */
     data class TurnCompleted(val turnId: String) : AgentEvent
 
-    /** Terminal event: the turn failed; [message] is user-presentable. */
-    data class TurnFailed(val message: String) : AgentEvent
+    /**
+     * Terminal event: the turn failed. [turnId] pairs with
+     * [TurnStarted]/[TurnCompleted] so a bridge can attribute the
+     * failure to its turn; [error] is the typed failure (A2/D3) whose
+     * `message` is user-presentable.
+     */
+    data class TurnFailed(val turnId: String, val error: AgentError) : AgentEvent
 }
