@@ -13,7 +13,7 @@ import androidx.lifecycle.viewModelScope
 import com.anvex.core.ai.AiError
 import com.anvex.core.ai.ProviderClientFactory
 import com.anvex.core.android.AppGraph
-import com.anvex.core.android.repo.AgentEngine
+import com.anvex.core.android.repo.EngineChoice
 import com.anvex.core.android.repo.ChatRepository
 import com.anvex.core.android.runtime.pi.PiEngine
 import com.anvex.core.android.runtime.pi.PiProviderMapping
@@ -141,7 +141,7 @@ class ChatViewModel(
     // (same UiState shape, so the screen needs no engine awareness).
     private val _piUi = MutableStateFlow(ChatSession.UiState())
     val engineIsPi: StateFlow<Boolean> = graph.settings.settings
-        .map { it.agentEngine == AgentEngine.PI }
+        .map { it.agentEngine == EngineChoice.PI }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), false)
 
     val sessionState: StateFlow<ChatSession.UiState> =

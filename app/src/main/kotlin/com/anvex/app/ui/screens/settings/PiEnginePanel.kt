@@ -25,7 +25,7 @@ import com.anvex.app.i18n.tr
 import com.anvex.app.ui.components.AnvexCard
 import com.anvex.app.ui.components.AnvexSectionHeader
 import com.anvex.core.android.AppGraph
-import com.anvex.core.android.repo.AgentEngine
+import com.anvex.core.android.repo.EngineChoice
 import com.anvex.core.android.repo.AppSettings
 import com.anvex.core.android.runtime.node.NodeMobileRuntime
 import com.anvex.core.android.runtime.pi.PiEngine
@@ -70,8 +70,8 @@ fun PiEnginePanel() {
                 supportingContent = { Text("Anvex DurableTaskEngine") },
                 leadingContent = {
                     RadioButton(
-                        selected = settings.agentEngine == AgentEngine.NATIVE,
-                        onClick = { scope.launch { graph.settings.setAgentEngine(AgentEngine.NATIVE) } },
+                        selected = settings.agentEngine == EngineChoice.NATIVE,
+                        onClick = { scope.launch { graph.settings.setAgentEngine(EngineChoice.NATIVE) } },
                     )
                 },
             )
@@ -88,8 +88,8 @@ fun PiEnginePanel() {
                 },
                 leadingContent = {
                     RadioButton(
-                        selected = settings.agentEngine == AgentEngine.PI,
-                        onClick = { scope.launch { graph.settings.setAgentEngine(AgentEngine.PI) } },
+                        selected = settings.agentEngine == EngineChoice.PI,
+                        onClick = { scope.launch { graph.settings.setAgentEngine(EngineChoice.PI) } },
                     )
                 },
             )
