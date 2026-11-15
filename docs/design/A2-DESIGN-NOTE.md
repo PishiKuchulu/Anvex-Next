@@ -703,6 +703,18 @@ in the loop (ADR-0002 parity items, later).
   from backup (device-local, like `providerModelSets`).
   `:core:ai`/`:core:agent` never read settings — a snapshot is
   passed in.
+
+> **Post-sign-off errata (A2c — landing-stage correction; the
+> persistence decision above is unchanged):** the sentence "The
+> `ToolCallingOverride` type lands in A2a" did not hold. The A2a
+> scope (§6) and its execution prompt omitted the type, nothing in
+> A2a referenced it, and its only consumer is the router (§5.4).
+> The architect ruled at A2a acceptance (2026-11-14) that the
+> absence was NOT an A2a defect — the inconsistency was this
+> note's own — and that the type lands with its consumer in A2c.
+> It now lives in `:core:ai` beside `ProviderCapabilities` (§5.3);
+> persistence + resolution still land with the A3 wiring, as
+> decided above.
 - **Q3.** `AgentError.Provider.message` delegates to
   `AiError.message` (raw provider text). The bridge passes the
   `AiError` itself to `UiState.error`, whose UI renders

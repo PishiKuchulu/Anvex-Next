@@ -166,6 +166,18 @@ class AgentLoopToolExecutor(
         // durable task path passes (AgentTaskBridge) — while the
         // runtime's own assessment and the AI allowlist escalation
         // still run unchanged.
+        //
+        // COUPLING WARNING (A2c carry-forward): the `{ true }` below
+        // is safe ONLY because `CoreTools.BASH_SPEC.requiresApproval`
+        // is true, which makes TurnRunner's gate ALWAYS request
+        // ApprovalGateway approval for a bash call before this
+        // executor runs — so by the time this lambda is consulted,
+        // the user has already approved this exact command. If that
+        // spec flag ever flips to false, this lambda becomes an
+        // UNPROMPTED execution path: the runtime would ask its seam,
+        // receive `true`, and run with no user approval anywhere.
+        // The invariant is locked by TurnRunnerTest
+        // .bashAlwaysRequestsGatewayApprovalBeforeExecution.
         val runtime = AndroidShellRuntime(root) { true }
         val result = runtime.execute(command, origin = ShellOrigin.AI)
         return when {

@@ -117,7 +117,7 @@ class OpenAiCompatibleClient(
         // a request parameter (reasoning_effort / stream_options / unknown
         // parameter); a blank message is retried because its cause is unknown.
         if (outcome.failure?.httpStatus == 400 && outcome.tokenCount == 0 &&
-            isParameterRejection(outcome.failure?.message)
+            outcome.failure?.isParameterRejection() == true
         ) {
             outcome = runAttempt(request, messages, effort, sendEffort = false, sendUsageOptions = false)
         }
@@ -174,17 +174,10 @@ class OpenAiCompatibleClient(
      * they arrive; the outcome reports whether anything streamed, so the
      * caller can decide whether a retry is safe.
      */
-    /** M-16: is this 400 plausibly a rejected request parameter (retryable) rather than a bad model / context / key? */
-    private fun isParameterRejection(message: String?): Boolean {
-        if (message.isNullOrBlank()) return true
-        val m = message.lowercase()
-        if (m.contains("model") && (m.contains("not found") || m.contains("does not exist"))) return false
-        if (m.contains("context") && (m.contains("length") || m.contains("too long") || m.contains("too large"))) return false
-        if (m.contains("api key") || m.contains("authentication") || m.contains("unauthorized")) return false
-        return m.contains("reasoning") || m.contains("stream_options") || m.contains("unsupported") ||
-            m.contains("unknown parameter") || m.contains("invalid parameter") ||
-            m.contains("additional properties")
-    }
+    // M-16's parameter-rejection heuristic lives on AiError itself
+    // (AiTypes.kt, `isParameterRejection`) — A2c extracted it so the
+    // agent router classifies the same 400s the same way; this client
+    // calls that shared copy.
 
     private suspend fun kotlinx.coroutines.flow.FlowCollector<StreamEvent>.runAttempt(
         request: ChatRequest,
