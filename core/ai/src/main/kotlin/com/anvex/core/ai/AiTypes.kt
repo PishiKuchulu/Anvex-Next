@@ -160,3 +160,26 @@ data class ValidationResult(
     val message: String,
     val modelsFound: Int = 0,
 )
+
+/**
+ * M-16: does this error's message plausibly report a rejected request
+ * *parameter* (rather than a bad model / over-long context / bad key)?
+ * A blank message counts as a rejection because its cause is unknown.
+ *
+ * This is the ONE shared copy of the heuristic (A2c): the OpenAI
+ * client uses it to decide its retry-without-optional-knobs, and
+ * `:core:agent`'s router uses it — on an HTTP 400 — to recognize the
+ * tool-specific failure that arms the bounded bolt downgrade
+ * (design note §5.3). Callers gate on `httpStatus == 400` themselves,
+ * exactly as the client's retry always did.
+ */
+fun AiError.isParameterRejection(): Boolean {
+    if (message.isBlank()) return true
+    val m = message.lowercase()
+    if (m.contains("model") && (m.contains("not found") || m.contains("does not exist"))) return false
+    if (m.contains("context") && (m.contains("length") || m.contains("too long") || m.contains("too large"))) return false
+    if (m.contains("api key") || m.contains("authentication") || m.contains("unauthorized")) return false
+    return m.contains("reasoning") || m.contains("stream_options") || m.contains("unsupported") ||
+        m.contains("unknown parameter") || m.contains("invalid parameter") ||
+        m.contains("additional properties")
+}

@@ -155,6 +155,42 @@ class TurnRunnerTest {
         )
     }
 
+    @Test fun bashAlwaysRequestsGatewayApprovalBeforeExecution() = runBlocking {
+        // INVARIANT LOCK (A2c carry-forward): `AgentLoopToolExecutor`
+        // (core:android) answers the shell runtime's own approval seam
+        // with an already-decided `{ true }` lambda. That is safe ONLY
+        // because THIS gate always obtains gateway approval for a bash
+        // call before executing it — which holds only because
+        // CoreTools.BASH_SPEC.requiresApproval is true. This test is
+        // the tripwire: a benign `ls` (whose safety assessment does
+        // not escalate) must STILL be gateway-approved, and approval
+        // must precede execution. If the spec flag ever flips, the
+        // gateway request disappears here and this test fails —
+        // before the executor's `{ true }` can become an unprompted
+        // execution path.
+        assertTrue(CoreTools.BASH_SPEC.requiresApproval)
+        val order = mutableListOf<String>()
+        val gateway = object : ApprovalGateway {
+            override suspend fun requestApproval(request: ApprovalRequest): ApprovalDecision {
+                order += "approval:${request.call.toolName}"
+                return ApprovalDecision.Approved
+            }
+        }
+        val executor = object : ToolExecutor {
+            override suspend fun execute(context: TurnContext, call: ToolCall): ToolResult {
+                order += "execute:${call.toolName}"
+                return ToolResult(call.id, call.toolName, "ok")
+            }
+        }
+        val planner = ScriptedPlanner(listOf(PlannedAction.CallTool(bashCall()), PlannedAction.Respond("done")))
+        val runner = TurnRunner(planner, executor, gateway)
+
+        val events = runner.runTurn(context, "list files").toList()
+
+        assertEquals(listOf("approval:bash", "execute:bash"), order)
+        assertTrue(events.last() is AgentEvent.TurnCompleted)
+    }
+
     @Test fun safeReadSkipsApprovalGateway() = runBlocking {
         val readCall = ToolCall("c2", CoreTools.READ, """{"path":"a.txt"}""")
         val planner = ScriptedPlanner(listOf(PlannedAction.CallTool(readCall), PlannedAction.Respond("read it")))

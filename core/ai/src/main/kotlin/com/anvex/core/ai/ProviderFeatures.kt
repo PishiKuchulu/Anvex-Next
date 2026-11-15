@@ -18,6 +18,47 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 
 /**
+ * A2c (design note §5.3): how much is known about a provider kind's
+ * native tool-calling support. Capability *knowledge* lives here in
+ * `:core:ai`; *selection* lives in `:core:agent`'s router; *resolution*
+ * (settings, stored override) lives in `:core:android` — neither
+ * `:core:ai` nor `:core:agent` ever reads settings.
+ */
+enum class ToolCallingSupport {
+    /** The first-party client implements tool-calling for this kind. */
+    NATIVE,
+
+    /**
+     * The wire format can carry tools but this endpoint's support is
+     * unproven (aggregators, account tiers, local servers). The router
+     * attempts native with the bounded runtime downgrade armed (§5.3).
+     */
+    WIRE_CAPABLE_UNKNOWN,
+
+    /** No tool-calling attempt: the router goes straight to bolt text. */
+    NONE,
+}
+
+/**
+ * A2c (design note §5.3, Q2): the user's explicit tool-calling mode
+ * for one provider, resolved by the settings layer and handed to the
+ * router as part of a capability snapshot — a *value*, never a
+ * settings read inside `:core:ai` or `:core:agent`. Persistence
+ * (settings map keyed by provider id) lands with the A3 wiring; this
+ * stage ships the type only.
+ */
+enum class ToolCallingOverride {
+    /** Follow the static [ToolCallingSupport] table. */
+    AUTO,
+
+    /** Use the native planner even when the table says otherwise. */
+    FORCE_NATIVE,
+
+    /** Use the bolt-text planner even when the table says native. */
+    FORCE_BOLT,
+}
+
+/**
  * Phase 4 capability model: a feature is offered in the UI only when the provider kind
  * supports it. Unsupported kinds keep the existing agent tools instead.
  */
@@ -27,6 +68,38 @@ object ProviderCapabilities {
 
     fun imageGeneration(kind: ProviderKind): Boolean =
         kind == ProviderKind.OPENAI || kind == ProviderKind.GEMINI
+
+    /**
+     * A2c (design note §5.3): the static tool-calling table — no
+     * probing. Conservative by default (the `GeminiCapabilities`
+     * precedent): a kind the table does not name gets [NONE]. The
+     * `when` is exhaustive, so a future kind cannot be added without
+     * classifying it here.
+     */
+    fun toolCalling(kind: ProviderKind): ToolCallingSupport = when (kind) {
+        // First-party kinds, plus their custom-compatible counterparts
+        // (the factory routes those to the same clients).
+        ProviderKind.OPENAI,
+        ProviderKind.ANTHROPIC,
+        ProviderKind.GEMINI,
+        ProviderKind.CUSTOM_OPENAI,
+        ProviderKind.CUSTOM_ANTHROPIC -> ToolCallingSupport.NATIVE
+        // OpenAI-wire aggregators and account tiers of unknown
+        // ability, plus local servers (note §5.3).
+        ProviderKind.OPENROUTER,
+        ProviderKind.DEEPSEEK,
+        ProviderKind.GROQ,
+        ProviderKind.MISTRAL,
+        ProviderKind.ZAI_ACCOUNT,
+        ProviderKind.OPENCODE_FREE,
+        ProviderKind.OPENCODE_ZEN,
+        ProviderKind.OLLAMA,
+        ProviderKind.LMSTUDIO -> ToolCallingSupport.WIRE_CAPABLE_UNKNOWN
+        // Retired kinds, kept only so legacy Room rows decode; not
+        // named by the §5.3 table, so "anything else" applies.
+        ProviderKind.CLINE,
+        ProviderKind.ANTIGRAVITY -> ToolCallingSupport.NONE
+    }
 }
 
 /** Phase 4.3: image generation through OpenAI-style and Gemini image endpoints. */
