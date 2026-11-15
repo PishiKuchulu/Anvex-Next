@@ -255,7 +255,7 @@ class AppGraph private constructor(private val app: Application) {
      * durable task id.
      */
     suspend fun enqueueAgentTask(goal: String, projectId: String, context: String = ""): Long =
-        if (settings.settings.first().agentEngine == com.anvex.core.android.repo.AgentEngine.PI) {
+        if (settings.settings.first().agentEngine == com.anvex.core.android.repo.EngineChoice.PI) {
             piTaskBridge.enqueue(prompt = goal, projectId = projectId, context = context)
         } else {
             agentTaskBridge.enqueue(goal = goal, context = context, projectId = projectId)

@@ -60,7 +60,7 @@ enum class NodeBackend { IN_APP, TERMUX }
  *   CommandApprovalService, and the native engine stays the default.
  */
 @Serializable
-enum class AgentEngine { NATIVE, PI }
+enum class EngineChoice { NATIVE, PI }
 
 /** Atelier theme accent choices (design: six accent dots in Settings). */
 enum class AtelierAccent { ORANGE, BLUE, GREEN, VIOLET, ROSE, TEAL }
@@ -99,7 +99,7 @@ data class AppSettings(
     /** v4.4: allow forwarding commands to Termux through RUN_COMMAND (opt-in). */
     val termuxBridgeEnabled: Boolean = false,
     /** v4.9: agent engine selection (native harness vs Pi, experimental). */
-    val agentEngine: AgentEngine = AgentEngine.NATIVE,
+    val agentEngine: EngineChoice = EngineChoice.NATIVE,
     /** v4.14 (Atelier): the selected accent for the Atelier theme. */
     val atelierAccent: AtelierAccent = AtelierAccent.ORANGE,
     /** Review A8: the on-launch update check can be turned off; the
@@ -200,7 +200,7 @@ class SettingsRepository(private val context: Context) {
             webToolsEnabled = p[Keys.WEB_TOOLS] ?: true,
             nodeBackend = p[Keys.NODE_BACKEND]?.let { runCatching { NodeBackend.valueOf(it) }.getOrNull() } ?: NodeBackend.IN_APP,
             termuxBridgeEnabled = p[Keys.TERMUX_BRIDGE] ?: false,
-            agentEngine = p[Keys.AGENT_ENGINE]?.let { runCatching { AgentEngine.valueOf(it) }.getOrNull() } ?: AgentEngine.NATIVE,
+            agentEngine = p[Keys.AGENT_ENGINE]?.let { runCatching { EngineChoice.valueOf(it) }.getOrNull() } ?: EngineChoice.NATIVE,
             atelierAccent = p[Keys.ATELIER_ACCENT]?.let { runCatching { AtelierAccent.valueOf(it) }.getOrNull() } ?: AtelierAccent.ORANGE,
             autoUpdateCheck = p[Keys.AUTO_UPDATE_CHECK] ?: true,
             autoBackupEnabled = p[Keys.AUTO_BACKUP] ?: true,
@@ -225,7 +225,7 @@ class SettingsRepository(private val context: Context) {
     suspend fun setCustomInstructions(v: String) = context.dataStore.edit { it[Keys.CUSTOM_INSTRUCTIONS] = v.take(4_000) }
     suspend fun setWebToolsEnabled(v: Boolean) = context.dataStore.edit { it[Keys.WEB_TOOLS] = v }
     suspend fun setNodeBackend(v: NodeBackend) = context.dataStore.edit { it[Keys.NODE_BACKEND] = v.name }
-    suspend fun setAgentEngine(v: AgentEngine) = context.dataStore.edit { it[Keys.AGENT_ENGINE] = v.name }
+    suspend fun setAgentEngine(v: EngineChoice) = context.dataStore.edit { it[Keys.AGENT_ENGINE] = v.name }
     suspend fun setAtelierAccent(v: AtelierAccent) = context.dataStore.edit { it[Keys.ATELIER_ACCENT] = v.name }
     suspend fun setAutoUpdateCheck(v: Boolean) = context.dataStore.edit { it[Keys.AUTO_UPDATE_CHECK] = v }
     suspend fun setAutoBackupEnabled(v: Boolean) = context.dataStore.edit { it[Keys.AUTO_BACKUP] = v }
